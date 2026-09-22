@@ -1,0 +1,13 @@
+pandas
+numpy
+requests
+Pillow
+tqdm
+nltk
+scikit-learn
+pytesseract
+matplotlib
+seaborn
+termcolor
+torch
+transformers

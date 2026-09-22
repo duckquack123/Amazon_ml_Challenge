@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.DS_Store
+*.unknown
+
+# Local environments and secrets
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Challenge data and generated artifacts
+# Keep raw data, downloaded images, embeddings, checkpoints, and submissions out of Git.
+dataset/*.csv
+dataset2/
+embeddings/
+images/
+models/
+submission/*.csv
+src/image_cache/
+
+# Reports, plots, and intermediate outputs
+*.png
+*.pdf
+*.zip
+*.log
+*.aux
+*.out
+*.toc
+*.synctex.gz
+texput.log
