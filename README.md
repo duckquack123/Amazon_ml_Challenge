@@ -1,13 +1,94 @@
-# Smart Product Pricing
+# Multimodal Product Pricing
 
-This repository contains an ML solution for the Amazon ML Challenge 2025 Smart
-Product Pricing task. The pipeline combines product text, engineered metadata,
-and image-derived features to predict product prices.
+> A dual-model pricing system that reads product language, product imagery, and structured packaging signals, then blends two complementary regressors into one submission.
 
-## Quick Start
+## The Solution
 
-Create a virtual environment, install the dependencies, and place the supplied
-CSV files under `dataset/`:
+Product price is rarely explained by one field. This project combines two views of the same catalog record:
+
+```text
+catalog_content ──┬── regex + text statistics ───────────────┐
+                  ├── CLIP text embedding (512d) ────────────┤
+image_link ───────┴── CLIP image embedding (512d) ───────────┤
+                                                             │
+                                      SVD: 1,030 -> 256d ────┴── LightGBM
+
+catalog_content ── DistilBERT [CLS] (768d) ──┐
+                                              ├── LayerNorm -> MLP -> price
+image embedding (512d) ──────────────────────┘
+
+              inverse-validation-SMAPE weighted ensemble
+                         -> positive price submission
+```
+
+### Branch 1: CLIP + LightGBM
+
+- Extracts quantity, pack/count, weight/volume, text length, word count,
+  capital ratio, and digit ratio from `catalog_content`.
+- Generates normalized 512-dimensional CLIP text and image embeddings with
+  `openai/clip-vit-base-patch32`.
+- Uses truncated SVD to compress the combined feature space from 1,030 to 256
+  dimensions while retaining the dominant signal.
+- Trains LightGBM with shuffled 5-fold validation, early stopping, and modest
+  L1/L2 regularization.
+
+This branch is fast, tolerant of missing values, and straightforward to inspect
+through feature importance.
+
+### Branch 2: DistilBERT + MLP
+
+- Encodes the catalog text with `distilbert-base-uncased`.
+- Concatenates the DistilBERT `[CLS]` representation with precomputed image
+  embeddings.
+- Applies LayerNorm, dense layers, ReLU, and dropout before the regression head.
+- Trains on `log1p(price)` with AdamW and evaluates after converting predictions
+  back to the original price scale.
+
+The log transform reduces the influence of expensive outliers and makes the
+neural branch better aligned with the relative-error nature of SMAPE.
+
+### Ensemble
+
+Each branch receives a validation SMAPE score. The final prediction gives more
+weight to the stronger branch:
+
+```text
+w_i = 1 / (SMAPE_i + 1e-8)
+price = (w_lgb * price_lgb + w_nn * price_nn) / (w_lgb + w_nn)
+```
+
+Predictions are clipped to a minimum of `0.01` and written with the required
+`sample_id,price` columns. The submitted report describes this as the intended
+final architecture; the repository does not claim a verified final leaderboard
+score because one is not recorded in the report.
+
+## Project Map
+
+```text
+.
+├── README.md                    # Architecture and usage
+├── sample_code.py               # Deterministic format-check baseline
+├── requirements.txt             # Python dependencies
+├── Documentation_template.md   # Challenge documentation template
+├── src/
+│   ├── Transformer_Code.py      # DistilBERT + image-embedding branch
+│   ├── data_preprocessing.py    # Quantity extraction and OCR features
+│   ├── generate_plots.py        # Exploratory analysis plots
+│   ├── csv_comparison.py        # Submission comparison utility
+│   └── utils.py                 # Image download helper
+├── main.ipynb                   # Combined experiment notebook
+└── src/*.ipynb                  # Supporting experiments and analysis
+```
+
+Large challenge inputs, downloaded images, embeddings, trained checkpoints,
+plots, archives, and generated submissions are intentionally excluded from Git.
+Keep those in local artifact storage or Git LFS rather than committing them to
+the source repository.
+
+## Run The Baseline
+
+The baseline is only a submission-format check. It predicts the training-set
+median and does not represent the multimodal model:
 
 ```bash
 python -m venv .venv
@@ -15,138 +96,43 @@ python -m pip install -r requirements.txt
 python sample_code.py
 ```
 
-The baseline writes `submission/baseline_submission.csv`. It predicts the
-training-set median and is intended as a reproducible format check, not as the
-final model.
+Output: `submission/baseline_submission.csv`.
 
-For the OCR preprocessing pipeline, run:
+## Run Preprocessing
 
 ```bash
-python src/data_preprocessing.py --input_file dataset/train.csv \
-   --output_file dataset2/processed_for_model.csv
+python src/data_preprocessing.py \
+  --input_file dataset/train.csv \
+  --output_file dataset2/processed_for_model.csv
 ```
 
-Set `TESSERACT_CMD` to the local Tesseract executable when it is not available
-on `PATH`. The transformer pipeline reads its data from `dataset2/` and
-`embeddings/`; override those locations with the `TRAIN_FILE`, `TEST_FILE`,
-`TRAIN_EMBEDDINGS_FILE`, and `TEST_EMBEDDINGS_FILE` environment variables.
+The OCR stage uses Tesseract when configured. Set `TESSERACT_CMD` if the
+executable is not on `PATH`.
 
-## Repository Layout
+The transformer script reads generated CSV and embedding files from
+`dataset2/` and `embeddings/` by default. Override them with
+`TRAIN_FILE`, `TEST_FILE`, `TRAIN_EMBEDDINGS_FILE`, and
+`TEST_EMBEDDINGS_FILE`.
 
-- `sample_code.py`: deterministic baseline submission generator.
-- `src/`: preprocessing, analysis, plotting, and model-training scripts.
-- `dataset/`, `dataset2/`, `embeddings/`, `images/`, and `models/`: local data
-   and generated artifacts, excluded from Git by default.
-- `Documentation_template.md`: format for the required methodology report.
+## Reproducibility Notes
 
-Generated datasets, downloaded images, model checkpoints, notebooks with large
-outputs, and submission archives should be stored outside the source tree or
-managed with an artifact store. Do not commit credentials or external price
-data; the challenge explicitly prohibits external price lookup.
+- GPU acceleration is recommended for CLIP and DistilBERT.
+- CPU execution is sufficient for preprocessing and LightGBM.
+- Failed image downloads use a white placeholder so one unavailable image does
+  not stop feature generation.
+- External price lookup is prohibited by the challenge and is not part of this
+  solution.
+- The final report is preserved locally as a generated artifact and is not
+  committed because PDFs are excluded by `.gitignore`.
 
-## Challenge Specification
+## Data Contract
 
-## Smart Product Pricing Challenge
+Training and test records contain `sample_id`, `catalog_content`, and
+`image_link`; training records additionally contain `price`. A valid submission
+must contain exactly these columns:
 
-In e-commerce, determining the optimal price point for products is crucial for marketplace success and customer satisfaction. Your challenge is to develop an ML solution that analyzes product details and predict the price of the product. The relationship between product attributes and pricing is complex - with factors like brand, specifications, product quantity directly influence pricing. Your task is to build a model that can analyze these product details holistically and suggest an optimal price.
-
-### Data Description:
-
-The dataset consists of the following columns:
-
-1. **sample_id:** A unique identifier for the input sample
-2. **catalog_content:** Text field containing title, product description and an Item Pack Quantity(IPQ) concatenated.
-4. **image_link:** Public URL where the product image is available for download. 
-   Example link - https://m.media-amazon.com/images/I/71XfHPR36-L.jpg
-   To download images, use the `download_images` function from `src/utils.py`.
-4. **price:** Price of the product (Target variable - only available in training data)
-
-### Dataset Details:
-
-- **Training Dataset:** 75k products with complete product details and prices
-- **Test Set:** 75k products for final evaluation
-
-### Output Format:
-
-The output file should be a CSV with 2 columns:
-
-1. **sample_id:** The unique identifier of the data sample. Note the ID should match the test record sample_id.
-2. **price:** A float value representing the predicted price of the product.
-
-Note: Make sure to output a prediction for all sample IDs. If you have less/more number of output samples in the output file as compared to test.csv, your output won't be evaluated.
-
-### File Descriptions:
-
-*Source files*
-
-1. **src/utils.py:** Contains helper functions for downloading images from the image_link. You may need to retry a few times to download all images due to possible throttling issues.
-2. **sample_code.py:** Sample dummy code that can generate an output file in the given format. Usage of this file is optional.
-
-*Dataset files*
-
-1. **dataset/train.csv:** Training file with labels (`price`).
-2. **dataset/test.csv:** Test file without output labels (`price`). Generate predictions using your model/solution on this file's data and format the output file to match sample_test_out.csv
-3. **dataset/sample_test.csv:** Sample test input file.
-4. **dataset/sample_test_out.csv:** Sample outputs for sample_test.csv. The output for test.csv must be formatted in the exact same way. Note: The predictions in the file might not be correct
-
-### Constraints:
-
-1. You will be provided with a sample output file. Format your output to match the sample output file exactly. 
-
-2. Predicted prices must be positive float values.
-
-3. Final model should be a MIT/Apache 2.0 License model and up to 8 Billion parameters.
-
-### Evaluation Criteria:
-
-Submissions are evaluated using **Symmetric Mean Absolute Percentage Error (SMAPE)**: A statistical measure that expresses the relative difference between predicted and actual values as a percentage, while treating positive and negative errors equally.
-
-**Formula:**
-```
-SMAPE = (1/n) * Σ |predicted_price - actual_price| / ((|actual_price| + |predicted_price|)/2)
+```text
+sample_id,price
 ```
 
-**Example:** If actual price = $100 and predicted price = $120  
-SMAPE = |100-120| / ((|100| + |120|)/2) * 100% = 18.18%
-
-**Note:** SMAPE is bounded between 0% and 200%. Lower values indicate better performance.
-
-### Leaderboard Information:
-
-- **Public Leaderboard:** During the challenge, rankings will be based on 25K samples from the test set to provide real-time feedback on your model's performance.
-- **Final Rankings:** The final decision will be based on performance on the complete 75K test set along with provided documentation of the proposed approach by the teams.
-
-### Submission Requirements:
-
-1. Upload a `test_out.csv` file in the Portal with the exact same formatting as `sample_test_out.csv`
-
-2. All participating teams must also provide a 1-page document describing:
-   - Methodology used
-   - Model architecture/algorithms selected
-   - Feature engineering techniques applied
-   - Any other relevant information about the approach
-   Note: A sample template for this documentation is provided in Documentation_template.md
-
-### **Academic Integrity and Fair Play:**
-
-**⚠️ STRICTLY PROHIBITED: External Price Lookup**
-
-Participants are **STRICTLY NOT ALLOWED** to obtain prices from the internet, external databases, or any sources outside the provided dataset. This includes but is not limited to:
-- Web scraping product prices from e-commerce websites
-- Using APIs to fetch current market prices
-- Manual price lookup from online sources
-- Using any external pricing databases or services
-
-**Enforcement:**
-- All submitted approaches, methodologies, and code pipelines will be thoroughly reviewed and verified
-- Any evidence of external price lookup or data augmentation from internet sources will result in **immediate disqualification**
-
-**Fair Play:** This challenge is designed to test your machine learning and data science skills using only the provided training data. External price lookup defeats the purpose of the challenge.
-
-
-### Tips for Success:
-
-- Consider both textual features (catalog_content) and visual features (product images)
-- Explore feature engineering techniques for text and image data
-- Consider ensemble methods combining different model types
-- Pay attention to outliers and data preprocessing
+with one positive floating-point prediction for every test `sample_id`.

@@ -26,6 +26,7 @@ images/
 models/
 submission/*.csv
 src/image_cache/
+Shubham Sent/
 
 # Reports, plots, and intermediate outputs
 *.png
